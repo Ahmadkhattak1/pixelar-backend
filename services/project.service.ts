@@ -134,6 +134,25 @@ export class ProjectService {
   }
 
   /**
+   * Hard delete project - removes project AND all its assets from Firestore and Firebase Storage
+   */
+  static async hardDelete(id: string, userId: string): Promise<{ assetsDeleted: number }> {
+    const project = await this.findById(id, userId);
+    if (!project) throw new Error('Project not found');
+
+    // First, hard delete all assets in this project
+    const AssetService = require('./asset.service').AssetService;
+    const assetsDeleted = await AssetService.hardDeleteByProject(id, userId);
+    console.log(`[Project] Deleted ${assetsDeleted} assets from project ${id}`);
+
+    // Then delete the project document from Firestore
+    await getCollection('projects').doc(id).delete();
+    console.log(`[Firestore] Project hard deleted: ${id}`);
+
+    return { assetsDeleted };
+  }
+
+  /**
    * Get project with assets count
    */
   static async findByIdWithStats(id: string, userId: string): Promise<any> {

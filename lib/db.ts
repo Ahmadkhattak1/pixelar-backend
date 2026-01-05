@@ -22,6 +22,9 @@ function getFirestoreInstance(): Firestore {
   let app: App | null = null;
   const apps = getApps();
 
+  // Storage bucket name
+  const storageBucket = process.env.FIREBASE_STORAGE_BUCKET || 'pixelar-webapp.firebasestorage.app';
+
   if (apps.length > 0) {
     app = apps[0];
   } else {
@@ -32,6 +35,7 @@ function getFirestoreInstance(): Firestore {
       const serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
       app = initializeApp({
         credential: cert(serviceAccount),
+        storageBucket,
       });
     } else {
       // Fall back to environment variables
@@ -48,6 +52,7 @@ function getFirestoreInstance(): Firestore {
           privateKey,
           clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
         }),
+        storageBucket,
       });
     }
   }
@@ -104,7 +109,7 @@ export function getStorageInstance(): Storage {
  * Defaults to default bucket if name not specified
  */
 export function getStorageBucket(bucketName?: string) {
-  const bucket = bucketName || process.env.FIREBASE_STORAGE_BUCKET;
+  const bucket = bucketName || process.env.FIREBASE_STORAGE_BUCKET || 'pixelar-webapp.firebasestorage.app';
   return getStorageInstance().bucket(bucket);
 }
 

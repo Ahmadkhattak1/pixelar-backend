@@ -3,7 +3,7 @@
  * Handles saving and retrieving generated assets (sprites, scenes, animations)
  */
 
-import { getCollection } from '../lib/db';
+import { getCollection, getStorageBucket } from '../lib/db';
 import { Timestamp } from 'firebase-admin/firestore';
 
 export interface CreateAssetInput {
@@ -124,7 +124,24 @@ export class AssetService {
 
         const docRef = await getCollection('assets').add(assetData);
         const doc = await docRef.get();
-        return { id: doc.id, ...doc.data() } as Asset;
+        const asset = { id: doc.id, ...doc.data() } as Asset;
+
+        // Auto-set project thumbnail if first asset
+        if (input.project_id && input.blob_url) {
+            try {
+                const ProjectService = require('./project.service').ProjectService;
+                const project = await ProjectService.findById(input.project_id, input.user_id);
+                if (project && !project.thumbnail_url) {
+                    await ProjectService.update(project.id, input.user_id, {
+                        thumbnail_url: input.blob_url
+                    });
+                }
+            } catch (error) {
+                console.error("Failed to auto-set project thumbnail:", error);
+            }
+        }
+
+        return asset;
     }
 
     /**
@@ -153,7 +170,24 @@ export class AssetService {
         if (updates.metadata !== undefined) updateData.metadata = { ...asset.metadata, ...updates.metadata };
 
         await getCollection('assets').doc(id).update(updateData);
-        return this.findById(id, userId) as Promise<Asset>;
+        const updatedAsset = await this.findById(id, userId) as Asset;
+
+        // Auto-set project thumbnail if asset is assigned to a project and project has no thumbnail
+        if (updates.project_id && updatedAsset.blob_url) {
+            try {
+                const ProjectService = require('./project.service').ProjectService;
+                const project = await ProjectService.findById(updates.project_id, userId);
+                if (project && !project.thumbnail_url) {
+                    await ProjectService.update(project.id, userId, {
+                        thumbnail_url: updatedAsset.blob_url
+                    });
+                }
+            } catch (error) {
+                console.error("Failed to auto-set project thumbnail on asset update:", error);
+            }
+        }
+
+        return updatedAsset;
     }
 
     /**
@@ -167,6 +201,81 @@ export class AssetService {
             status: 'deleted',
             updated_at: Timestamp.now(),
         });
+    }
+
+    /**
+     * Hard delete asset - removes from Firestore AND Firebase Storage
+     */
+    static async hardDelete(id: string, userId: string): Promise<void> {
+        const asset = await this.findById(id, userId);
+        if (!asset) throw new Error('Asset not found');
+
+        // Delete file from Firebase Storage
+        if (asset.blob_url) {
+            try {
+                // Extract the file path from the signed URL
+                // URL format: https://storage.googleapis.com/bucket-name/path/to/file.png?...
+                const url = new URL(asset.blob_url);
+                const pathMatch = url.pathname.match(/\/[^\/]+\/(.+)/);
+                if (pathMatch) {
+                    const filePath = decodeURIComponent(pathMatch[1]);
+                    console.log(`[Storage] Deleting file: ${filePath}`);
+
+                    const bucket = getStorageBucket();
+                    const file = bucket.file(filePath);
+
+                    // Check if file exists before deleting
+                    const [exists] = await file.exists();
+                    if (exists) {
+                        await file.delete();
+                        console.log(`[Storage] File deleted successfully: ${filePath}`);
+                    } else {
+                        console.log(`[Storage] File not found (already deleted?): ${filePath}`);
+                    }
+                }
+            } catch (storageError) {
+                console.error('[Storage] Error deleting file:', storageError);
+                // Continue with Firestore deletion even if storage deletion fails
+            }
+        }
+
+        // Hard delete from Firestore
+        await getCollection('assets').doc(id).delete();
+        console.log(`[Firestore] Asset hard deleted: ${id}`);
+    }
+
+    /**
+     * Hard delete multiple assets by project
+     */
+    static async hardDeleteByProject(projectId: string, userId: string): Promise<number> {
+        const assets = await this.list({
+            project_id: projectId,
+            user_id: userId,
+            status: 'active',
+            limit: 1000
+        });
+
+        // Also get soft-deleted assets
+        const deletedAssets = await this.list({
+            project_id: projectId,
+            user_id: userId,
+            status: 'deleted',
+            limit: 1000
+        });
+
+        const allAssets = [...assets, ...deletedAssets];
+        let deletedCount = 0;
+
+        for (const asset of allAssets) {
+            try {
+                await this.hardDelete(asset.id, userId);
+                deletedCount++;
+            } catch (error) {
+                console.error(`Failed to hard delete asset ${asset.id}:`, error);
+            }
+        }
+
+        return deletedCount;
     }
 
     /**

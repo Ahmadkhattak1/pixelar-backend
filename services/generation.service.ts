@@ -49,6 +49,20 @@ function getImageDimensions(aspectRatio: string): { width: number; height: numbe
     return ratioMap[aspectRatio] || { width: 1024, height: 1024 };
 }
 
+// Check if user wants a partial/half character based on prompt
+function wantsPartialCharacter(prompt: string): boolean {
+    const promptLower = prompt.toLowerCase();
+    return promptLower.includes('half body') ||
+        promptLower.includes('half-body') ||
+        promptLower.includes('upper body') ||
+        promptLower.includes('above chest') ||
+        promptLower.includes('portrait') ||
+        promptLower.includes('bust') ||
+        promptLower.includes('headshot') ||
+        promptLower.includes('face only') ||
+        promptLower.includes('torso');
+}
+
 // Build the generation prompt based on parameters
 function buildPrompt(params: GenerationParams): string {
     const { prompt, type, style, viewpoint, colors, dimensions, aspectRatio, spriteType, sceneType } = params;
@@ -67,6 +81,11 @@ function buildPrompt(params: GenerationParams): string {
         const entityType = spriteType === 'object' ? 'object/item' : 'character';
         fullPrompt += `This is a game sprite ${entityType} that should be suitable for use in a 2D video game. `;
         fullPrompt += 'The sprite should have a transparent or solid color background that can be easily removed. ';
+
+        // Full-body character requirement (unless user explicitly wants partial)
+        if (spriteType !== 'object' && !wantsPartialCharacter(prompt)) {
+            fullPrompt += 'IMPORTANT: Generate a FULL-BODY character showing the entire figure from head to feet. The character must be fully visible and standing, NOT cropped at the chest, waist, or knees. ';
+        }
     } else {
         const envType = sceneType === 'indoor' ? 'indoor' : 'outdoor';
         fullPrompt += `This is an ${envType} game scene or background environment for a 2D video game. `;
@@ -206,25 +225,59 @@ async function refinePromptWithIntelligence(
 ): Promise<string> {
     console.log("Calling Intelligence Layer (Gemini 2.5 Flash)...");
 
+    // Check if user explicitly wants a partial/half character
+    const isPartialCharacter = wantsPartialCharacter(userPrompt);
+
+    const styleDescription = context.style === 'pixel_art'
+        ? 'Pixel Art style with clear pixel boundaries, limited color palette, retro game aesthetic, sharp pixelated edges'
+        : '2D flat vector style with clean lines, solid colors, modern appearance';
+
+    const fullBodyInstruction = isPartialCharacter
+        ? ''
+        : `
+    CRITICAL CHARACTER REQUIREMENT:
+    - ALWAYS generate FULL-BODY characters showing the ENTIRE figure from head to feet
+    - Characters must be fully standing/visible, NOT cropped at chest, waist, or knees
+    - Include the character's full legs and feet in the frame
+    - The character should be centered and complete within the image bounds
+    - Do NOT generate half-body, bust, portrait, or cropped character images`;
+
     const systemInstruction = `You are an expert prompt engineer for game asset generation (sprites and scenes).
-    Your task is to take a user's request and transform it into a highly detailed, technical prompt optimized for an image generation model (like Stable Diffusion or Flux).
-    
-    Context:
-    Context:
-    - Type: ${context.type}
-    - SubType: ${context.type === 'sprite' ? (context.spriteType || 'character') : (context.sceneType || 'environment')}
-    - Style: ${context.style}
-    - Viewpoint: ${context.viewpoint}
-    - Aspect Ratio: ${context.aspectRatio}
-    
-    Output ONLY the raw prompt string. No explanations, no markdown.`;
+Your task is to ENHANCE the user's request into a detailed, technical prompt optimized for image generation.
+
+IMPORTANT RULES:
+1. PRESERVE THE ORIGINAL STYLE - Do not change the core artistic style the user requested
+2. Keep the same art direction (${styleDescription})
+3. Only add technical details that enhance quality without changing the fundamental look
+4. Do not add realistic elements to pixel art or stylized requests
+5. Maintain the game-ready aesthetic appropriate for 2D game assets
+${fullBodyInstruction}
+
+Context:
+- Type: ${context.type}
+- SubType: ${context.type === 'sprite' ? (context.spriteType || 'character') : (context.sceneType || 'environment')}
+- Style: ${context.style} (DO NOT CHANGE THIS)
+- Viewpoint: ${context.viewpoint}
+- Aspect Ratio: ${context.aspectRatio}
+
+Output ONLY the enhanced prompt string. No explanations, no markdown, no commentary.`;
+
+    const fullBodyPromptAddition = isPartialCharacter
+        ? ''
+        : ' The character must be FULL-BODY showing head to feet, completely visible and not cropped.';
 
     const input = {
-        prompt: `Create a detailed image generation prompt for: "${userPrompt}". Include specific details about lighting, texture, perspective, and style (` + (context.style === 'pixel_art' ? 'Pixel Art, retro, sharp edges' : 'Vector, flat, clean') + `).`,
+        prompt: `Enhance this prompt for game asset generation: "${userPrompt}"${fullBodyPromptAddition}
+
+Requirements:
+- Keep the ${context.style === 'pixel_art' ? 'pixel art' : '2D flat'} style intact
+- Add details about lighting, texture, and composition
+- Ensure the output is suitable for a ${context.type} game asset
+- Do NOT make it realistic or change the artistic style`,
         system_instruction: systemInstruction,
         max_output_tokens: 1024,
-        temperature: 0.7,
-        top_p: 0.95
+        temperature: 0.5, // Lower temperature for more consistent outputs
+        top_p: 0.9
     };
 
     try {
@@ -523,23 +576,17 @@ export async function uploadGeneratedImage(
     await file.save(buffer, {
         metadata: {
             contentType: mimeType,
-        },
-        public: true, // Make public for easy access
+        }
     });
 
-    // 4. Get public URL
-    // For default bucket: https://storage.googleapis.com/BUCKET_NAME/FILE_PATH
-    // Or check if a custom domain is configured.
-    // getSignedUrl is safer but expires. public() makes it public.
-    // file.publicUrl() might be available in newer SDKs, or we construct it.
+    // 4. Get signed URL (long expiry)
+    // Should be valid for a long time if we want it to act like public
+    const [url] = await file.getSignedUrl({
+        action: 'read',
+        expires: '03-01-2030', // Long expiry
+    });
 
-    // Construct public URL
-    // Cloud Storage: https://storage.googleapis.com/<bucket>/<path>
-    // Firebase defaults often use: https://firebasestorage.googleapis.com/v0/b/<bucket>/o/<path_encoded>?alt=media
-    // But `file.save({ public: true })` usually allows direct access via `storage.googleapis.com` if ACLs permit.
-    // Let's use `file.publicUrl()` if available or construct standard GCS URL.
-
-    return file.publicUrl();
+    return url;
 }
 
 // ============================================

@@ -1,0 +1,46 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    // Generated assets - public read, authenticated write
+    match /generated/{userId}/{allPaths=**} {
+      // Anyone can read generated assets (for sharing)
+      allow read: if true;
+      
+      // Only authenticated users can write to their own folder
+      allow write: if request.auth != null 
+                   && request.auth.uid == userId
+                   && request.resource.size < 10 * 1024 * 1024 // Max 10MB
+                   && request.resource.contentType.matches('image/.*');
+    }
+    
+    // User uploads (reference images, pose images)
+    match /uploads/{userId}/{allPaths=**} {
+      // Only the owner can read their uploads
+      allow read: if request.auth != null && request.auth.uid == userId;
+      
+      // Only authenticated users can write to their own folder
+      allow write: if request.auth != null 
+                   && request.auth.uid == userId
+                   && request.resource.size < 10 * 1024 * 1024 // Max 10MB
+                   && request.resource.contentType.matches('image/.*');
+    }
+    
+    // Project thumbnails
+    match /thumbnails/{projectId}/{allPaths=**} {
+      // Public read for project thumbnails
+      allow read: if true;
+      
+      // Authenticated users can write
+      allow write: if request.auth != null
+                   && request.resource.size < 2 * 1024 * 1024 // Max 2MB
+                   && request.resource.contentType.matches('image/.*');
+    }
+    
+    // Default deny all other paths
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
