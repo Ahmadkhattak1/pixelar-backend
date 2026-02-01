@@ -1,2 +1,9 @@
 pixelar-webapp-firebase-adminsdk-fbsvc-03ee05ff4b.json
 node_modules
+
+.env.local
+.env
+env_config.txt
+*.pem
+*.key
+.DS_Store
