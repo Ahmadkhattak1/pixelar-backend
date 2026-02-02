@@ -7,6 +7,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.generateImages = generateImages;
 exports.uploadGeneratedImage = uploadGeneratedImage;
 exports.generateAnimationFrames = generateAnimationFrames;
+exports.generateDirectAnimation = generateDirectAnimation;
 // Map aspect ratio to actual dimensions
 function getImageDimensions(aspectRatio) {
     const ratioMap = {
@@ -18,6 +19,19 @@ function getImageDimensions(aspectRatio) {
         '16:9': { width: 1024, height: 576 },
     };
     return ratioMap[aspectRatio] || { width: 1024, height: 1024 };
+}
+// Check if user wants a partial/half character based on prompt
+function wantsPartialCharacter(prompt) {
+    const promptLower = prompt.toLowerCase();
+    return promptLower.includes('half body') ||
+        promptLower.includes('half-body') ||
+        promptLower.includes('upper body') ||
+        promptLower.includes('above chest') ||
+        promptLower.includes('portrait') ||
+        promptLower.includes('bust') ||
+        promptLower.includes('headshot') ||
+        promptLower.includes('face only') ||
+        promptLower.includes('torso');
 }
 // Build the generation prompt based on parameters
 function buildPrompt(params) {
@@ -35,6 +49,10 @@ function buildPrompt(params) {
         const entityType = spriteType === 'object' ? 'object/item' : 'character';
         fullPrompt += `This is a game sprite ${entityType} that should be suitable for use in a 2D video game. `;
         fullPrompt += 'The sprite should have a transparent or solid color background that can be easily removed. ';
+        // Full-body character requirement (unless user explicitly wants partial)
+        if (spriteType !== 'object' && !wantsPartialCharacter(prompt)) {
+            fullPrompt += 'IMPORTANT: Generate a FULL-BODY character showing the entire figure from head to feet. The character must be fully visible and standing, NOT cropped at the chest, waist, or knees. ';
+        }
     }
     else {
         const envType = sceneType === 'indoor' ? 'indoor' : 'outdoor';
@@ -134,24 +152,54 @@ async function callReplicate(apiToken, model, input) {
 // Intelligence Layer: Gemini 2.5 Flash on Replicate
 async function refinePromptWithIntelligence(userPrompt, context, apiToken) {
     console.log("Calling Intelligence Layer (Gemini 2.5 Flash)...");
+    // Check if user explicitly wants a partial/half character
+    const isPartialCharacter = wantsPartialCharacter(userPrompt);
+    const styleDescription = context.style === 'pixel_art'
+        ? 'Pixel Art style with clear pixel boundaries, limited color palette, retro game aesthetic, sharp pixelated edges'
+        : '2D flat vector style with clean lines, solid colors, modern appearance';
+    const fullBodyInstruction = isPartialCharacter
+        ? ''
+        : `
+    CRITICAL CHARACTER REQUIREMENT:
+    - ALWAYS generate FULL-BODY characters showing the ENTIRE figure from head to feet
+    - Characters must be fully standing/visible, NOT cropped at chest, waist, or knees
+    - Include the character's full legs and feet in the frame
+    - The character should be centered and complete within the image bounds
+    - Do NOT generate half-body, bust, portrait, or cropped character images`;
     const systemInstruction = `You are an expert prompt engineer for game asset generation (sprites and scenes).
-    Your task is to take a user's request and transform it into a highly detailed, technical prompt optimized for an image generation model (like Stable Diffusion or Flux).
-    
-    Context:
-    Context:
-    - Type: ${context.type}
-    - SubType: ${context.type === 'sprite' ? (context.spriteType || 'character') : (context.sceneType || 'environment')}
-    - Style: ${context.style}
-    - Viewpoint: ${context.viewpoint}
-    - Aspect Ratio: ${context.aspectRatio}
-    
-    Output ONLY the raw prompt string. No explanations, no markdown.`;
+Your task is to ENHANCE the user's request into a detailed, technical prompt optimized for image generation.
+
+IMPORTANT RULES:
+1. PRESERVE THE ORIGINAL STYLE - Do not change the core artistic style the user requested
+2. Keep the same art direction (${styleDescription})
+3. Only add technical details that enhance quality without changing the fundamental look
+4. Do not add realistic elements to pixel art or stylized requests
+5. Maintain the game-ready aesthetic appropriate for 2D game assets
+${fullBodyInstruction}
+
+Context:
+- Type: ${context.type}
+- SubType: ${context.type === 'sprite' ? (context.spriteType || 'character') : (context.sceneType || 'environment')}
+- Style: ${context.style} (DO NOT CHANGE THIS)
+- Viewpoint: ${context.viewpoint}
+- Aspect Ratio: ${context.aspectRatio}
+
+Output ONLY the enhanced prompt string. No explanations, no markdown, no commentary.`;
+    const fullBodyPromptAddition = isPartialCharacter
+        ? ''
+        : ' The character must be FULL-BODY showing head to feet, completely visible and not cropped.';
     const input = {
-        prompt: `Create a detailed image generation prompt for: "${userPrompt}". Include specific details about lighting, texture, perspective, and style (` + (context.style === 'pixel_art' ? 'Pixel Art, retro, sharp edges' : 'Vector, flat, clean') + `).`,
+        prompt: `Enhance this prompt for game asset generation: "${userPrompt}"${fullBodyPromptAddition}
+
+Requirements:
+- Keep the ${context.style === 'pixel_art' ? 'pixel art' : '2D flat'} style intact
+- Add details about lighting, texture, and composition
+- Ensure the output is suitable for a ${context.type} game asset
+- Do NOT make it realistic or change the artistic style`,
         system_instruction: systemInstruction,
         max_output_tokens: 1024,
-        temperature: 0.7,
-        top_p: 0.95
+        temperature: 0.5, // Lower temperature for more consistent outputs
+        top_p: 0.9
     };
     try {
         const output = await callReplicate(apiToken, 'google/gemini-2.5-flash', input);
@@ -378,20 +426,15 @@ async function uploadGeneratedImage(dataUrl, userId, type) {
     await file.save(buffer, {
         metadata: {
             contentType: mimeType,
-        },
-        public: true, // Make public for easy access
+        }
     });
-    // 4. Get public URL
-    // For default bucket: https://storage.googleapis.com/BUCKET_NAME/FILE_PATH
-    // Or check if a custom domain is configured.
-    // getSignedUrl is safer but expires. public() makes it public.
-    // file.publicUrl() might be available in newer SDKs, or we construct it.
-    // Construct public URL
-    // Cloud Storage: https://storage.googleapis.com/<bucket>/<path>
-    // Firebase defaults often use: https://firebasestorage.googleapis.com/v0/b/<bucket>/o/<path_encoded>?alt=media
-    // But `file.save({ public: true })` usually allows direct access via `storage.googleapis.com` if ACLs permit.
-    // Let's use `file.publicUrl()` if available or construct standard GCS URL.
-    return file.publicUrl();
+    // 4. Get signed URL (long expiry)
+    // Should be valid for a long time if we want it to act like public
+    const [url] = await file.getSignedUrl({
+        action: 'read',
+        expires: '03-01-2030', // Long expiry
+    });
+    return url;
 }
 function buildAnimationFramePrompt(params, frameIndex, totalFrames) {
     const { viewType, direction, animationType, frameDescriptions } = params;
@@ -561,4 +604,99 @@ async function generateAnimationFrames(params, options = {}) {
         frames: [],
         error: 'No API key configured. Please add your own API key in settings.'
     };
+}
+async function generateDirectAnimation(params, options = {}) {
+    const { apiKey, provider, useOwnKey } = options;
+    const model = 'retro-diffusion/rd-animation';
+    let token = apiKey;
+    if (!useOwnKey || !token) {
+        token = process.env.REPLICATE_API_TOKEN;
+    }
+    if (!token) {
+        return {
+            success: false,
+            images: [],
+            error: 'No API key configured.'
+        };
+    }
+    try {
+        let finalPrompt = params.prompt;
+        // 1. Intelligence Layer (Optional)
+        if (!params.bypass_prompt_expansion) {
+            // Mock context for intelligence layer
+            const context = {
+                type: 'sprite',
+                spriteType: 'character',
+                style: params.style || 'pixel_art',
+                viewpoint: 'isometric', // default assumption
+                aspectRatio: '1:1'
+            };
+            // We reuse the existing refine prompt function but keep it simple
+            finalPrompt = await refinePromptWithIntelligence(params.prompt, context, token);
+        }
+        const images = [];
+        const quantity = params.quantity || 1;
+        // Loop for quantity since model might not support batching
+        for (let i = 0; i < quantity; i++) {
+            console.log(`Generating animation sheet ${i + 1}/${quantity} with ${model}...`);
+            const input = {
+                prompt: finalPrompt,
+                style: params.style || 'four_angle_walking',
+                width: params.width || 48,
+                height: params.height || 48,
+                seed: params.seed, // If provided, strictly use it. If looping, maybe increment?
+                // unique seed per iteration if not fixed?
+                // If user provides a seed, they usually want reproducibility. If quantity > 1, providing same seed gives same image.
+                // So if seed is present, we pass it. If null, we let API normalize.
+                // But for multiple variations, we shouldn't pass the same seed.
+                // Let's assume if quantity > 1 and seed is provided, maybe we increment it?
+                // For now, pass seed as is.
+                ...(params.seed !== undefined && { seed: params.seed }),
+                input_image: params.input_image,
+                return_spritesheet: params.return_spritesheet !== undefined ? params.return_spritesheet : true, // Default to true as per request
+                bypass_prompt_expansion: true // We already expanded it or user requested bypass. Logic implies we pass raw prompt to model if we expanded it ourselves.
+                // Actually the model implementation of "bypass_prompt_expansion" might disable its INTERNAL expansion.
+                // If we expanded it, we likely want to bypass internal expansion to avoid double cooking.
+                // So set this to true if we expanded, or pass user param.
+            };
+            // Force bypass if we did our own expansion? Or maybe the model's expansion is better specialized?
+            // Retro Diffusion models have good internal prompt expansion.
+            // If user passed bypass_prompt_expansion=false, they WANT expansion.
+            // Our `refinePromptWithIntelligence` uses Gemini. `rd-animation` might use GPT or simple logic.
+            // Let's trust the user's flag for the MODEL input.
+            // BUT if we used Gemini, we are sending a "cooked" prompt.
+            // Let's adhere to: If we use Gemini, we send that as prompt.
+            // Correct logic:
+            // If params.bypass_prompt_expansion is TRUE: We skip Gemini. We tell Model to bypass (maybe?).
+            // The Model's flag `bypass_prompt_expansion` likely disables ITS internal magic.
+            // Let's pass the params as-is to the model input regarding the flag, but we modify the prompt string itself if we used Gemini.
+            // Revised Input Construction
+            const payload = {
+                prompt: finalPrompt,
+                style: params.style || 'four_angle_walking',
+                width: params.width || 48,
+                height: params.height || 48,
+                return_spritesheet: params.return_spritesheet ?? true,
+                bypass_prompt_expansion: params.bypass_prompt_expansion ?? false,
+                ...(params.seed && { seed: params.seed }),
+                ...(params.input_image && { input_image: params.input_image }),
+            };
+            const output = await callReplicate(token, model, payload);
+            // Output should be a URI or list of URIs
+            const outputArray = Array.isArray(output) ? output : [output];
+            for (const url of outputArray) {
+                // Fetch and convert to base64
+                const imageResponse = await fetch(url);
+                const buffer = await imageResponse.arrayBuffer();
+                const base64 = Buffer.from(buffer).toString('base64');
+                const mime = imageResponse.headers.get('content-type') || 'image/png';
+                images.push(`data:${mime};base64,${base64}`);
+            }
+        }
+        return { success: true, images, provider: 'replicate' };
+    }
+    catch (error) {
+        console.error('Direct animation generation error:', error);
+        return { success: false, images: [], error: error.message, provider: 'replicate' };
+    }
 }

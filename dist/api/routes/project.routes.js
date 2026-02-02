@@ -10,6 +10,21 @@ const user_service_1 = require("../../services/user.service");
 const project_service_1 = require("../../services/project.service");
 const asset_service_1 = require("../../services/asset.service");
 const router = (0, express_1.Router)();
+// Helper to serialize Firestore timestamps to ISO strings
+function serializeProject(project) {
+    return {
+        ...project,
+        created_at: project.created_at?.toDate?.() ? project.created_at.toDate().toISOString() : project.created_at,
+        updated_at: project.updated_at?.toDate?.() ? project.updated_at.toDate().toISOString() : project.updated_at,
+    };
+}
+function serializeAsset(asset) {
+    return {
+        ...asset,
+        created_at: asset.created_at?.toDate?.() ? asset.created_at.toDate().toISOString() : asset.created_at,
+        updated_at: asset.updated_at?.toDate?.() ? asset.updated_at.toDate().toISOString() : asset.updated_at,
+    };
+}
 // GET /api/projects - List user's projects
 router.get('/', async (req, res) => {
     try {
@@ -33,7 +48,7 @@ router.get('/', async (req, res) => {
             status: status || 'active',
             limit: parseInt(limit),
         });
-        res.json({ success: true, projects });
+        res.json({ success: true, projects: projects.map(serializeProject) });
     }
     catch (error) {
         console.error('List projects error:', error);
@@ -70,8 +85,8 @@ router.get('/:id', async (req, res) => {
         });
         res.json({
             success: true,
-            project,
-            assets,
+            project: serializeProject(project),
+            assets: assets.map(serializeAsset),
         });
     }
     catch (error) {
@@ -108,7 +123,7 @@ router.post('/', async (req, res) => {
             settings,
             status: 'active',
         });
-        res.json({ success: true, project });
+        res.json({ success: true, project: serializeProject(project) });
     }
     catch (error) {
         console.error('Create project error:', error);
@@ -140,14 +155,14 @@ router.put('/:id', async (req, res) => {
             settings,
             status,
         });
-        res.json({ success: true, project });
+        res.json({ success: true, project: serializeProject(project) });
     }
     catch (error) {
         console.error('Update project error:', error);
         res.status(500).json({ error: 'Failed to update project' });
     }
 });
-// DELETE /api/projects/:id - Delete project
+// DELETE /api/projects/:id - Delete project (hard delete with all assets cleanup)
 router.delete('/:id', async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -164,8 +179,13 @@ router.delete('/:id', async (req, res) => {
             return res.status(404).json({ error: 'User not found' });
         }
         const { id } = req.params;
-        await project_service_1.ProjectService.delete(id, user.id);
-        res.json({ success: true, message: 'Project deleted' });
+        // Use hard delete to remove project AND all its assets from Firestore and Storage
+        const result = await project_service_1.ProjectService.hardDelete(id, user.id);
+        res.json({
+            success: true,
+            message: 'Project and all assets permanently deleted',
+            assetsDeleted: result.assetsDeleted
+        });
     }
     catch (error) {
         console.error('Delete project error:', error);

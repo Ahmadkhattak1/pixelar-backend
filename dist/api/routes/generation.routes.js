@@ -9,7 +9,23 @@ const auth_1 = require("../../lib/auth");
 const generation_service_1 = require("../../services/generation.service");
 const user_service_1 = require("../../services/user.service");
 const asset_service_1 = require("../../services/asset.service");
+const project_service_1 = require("../../services/project.service");
 const router = (0, express_1.Router)();
+// Helper to serialize Firestore timestamps to ISO strings
+function serializeAsset(asset) {
+    return {
+        ...asset,
+        created_at: asset.created_at?.toDate?.() ? asset.created_at.toDate().toISOString() : asset.created_at,
+        updated_at: asset.updated_at?.toDate?.() ? asset.updated_at.toDate().toISOString() : asset.updated_at,
+    };
+}
+function serializeProject(project) {
+    return {
+        ...project,
+        created_at: project.created_at?.toDate?.() ? project.created_at.toDate().toISOString() : project.created_at,
+        updated_at: project.updated_at?.toDate?.() ? project.updated_at.toDate().toISOString() : project.updated_at,
+    };
+}
 // POST /api/generate/sprite - Generate sprite images
 router.post('/sprite', async (req, res) => {
     try {
@@ -37,8 +53,9 @@ router.post('/sprite', async (req, res) => {
             });
         }
         // Get generation parameters
-        const { prompt, style = 'pixel_art', aspectRatio = '1:1', viewpoint = 'front', colors = [], dimensions = '64x64', quantity = 2, referenceImage, poseImage, spriteType = 'character', projectId, apiKey // User's own API key (BYOK)
-         } = req.body;
+        const { prompt, style = 'pixel_art', aspectRatio = '1:1', viewpoint = 'front', colors = [], dimensions = '64x64', quantity = 2, referenceImage, poseImage, spriteType = 'character', projectId, apiKey, // User's own API key (BYOK)
+        removeBg = true, // Default to true for transparent sprites
+        tileX = false, tileY = false } = req.body;
         if (!prompt || prompt.trim().length === 0) {
             return res.status(400).json({ error: 'Prompt is required' });
         }
@@ -58,6 +75,9 @@ router.post('/sprite', async (req, res) => {
             referenceImage,
             poseImage,
             spriteType,
+            removeBg,
+            tileX,
+            tileY,
         }, {
             apiKey: userApiKey,
             provider: userProvider,
@@ -74,24 +94,49 @@ router.post('/sprite', async (req, res) => {
         const uploadedUrls = [];
         const savedAssets = [];
         const shouldUpload = req.body.saveToCloud !== false;
-        if (shouldUpload) {
+        let createdProjectId = null;
+        let createdProject = null;
+        if (shouldUpload && result.images.length > 0) {
+            // Auto-create a new project for this generation (each generation gets its own project)
+            // Only create if no projectId was explicitly provided for "add to existing project" flow
+            if (!projectId) {
+                const projectTitle = prompt.length > 50 ? prompt.substring(0, 47) + '...' : prompt;
+                createdProject = await project_service_1.ProjectService.create({
+                    user_id: user.id,
+                    title: projectTitle || 'Untitled Sprite',
+                    type: 'sprite',
+                    description: prompt,
+                    settings: {
+                        style,
+                        viewpoint,
+                        dimensions,
+                        sprite_type: spriteType
+                    },
+                    status: 'active'
+                });
+                createdProjectId = createdProject.id;
+                console.log(`[Project] Auto-created project: ${createdProjectId}`);
+            }
+            else {
+                createdProjectId = projectId;
+            }
             for (let i = 0; i < result.images.length; i++) {
                 const imageDataUrl = result.images[i];
                 try {
+                    console.log(`[Upload] Starting upload for image ${i + 1}/${result.images.length}...`);
                     const url = await (0, generation_service_1.uploadGeneratedImage)(imageDataUrl, user.id, 'sprite');
+                    console.log(`[Upload] Upload successful for image ${i + 1}. URL: ${url}`);
                     uploadedUrls.push(url);
                     // Determine file type from data URL
                     const mimeMatch = imageDataUrl.match(/data:([^;]+);/);
                     const mimeType = mimeMatch ? mimeMatch[1] : 'image/png';
                     const isGif = mimeType === 'image/gif';
                     const fileType = isGif ? 'gif' : 'png';
-                    // Save asset to database with all details
+                    // Save asset to database - linked to the project
                     const asset = await asset_service_1.AssetService.create({
-                        project_id: projectId || undefined,
+                        project_id: createdProjectId || undefined,
                         user_id: user.id,
-                        name: `${spriteType}_${Date.now()}_${i + 1}`, // Logic handles extension in storage, name is just display name usually?
-                        // Actually name might not need extension, or we can add it.
-                        // Let's explicitly pass file_type
+                        name: `${spriteType}_${Date.now()}_${i + 1}`,
                         asset_type: 'sprite',
                         file_type: fileType,
                         blob_url: url,
@@ -123,7 +168,9 @@ router.post('/sprite', async (req, res) => {
         res.json({
             success: true,
             images: shouldUpload ? uploadedUrls : result.images,
-            assets: savedAssets,
+            assets: savedAssets.map(serializeAsset),
+            project: createdProject ? serializeProject(createdProject) : null,
+            projectId: createdProjectId,
             creditsUsed: apiKey ? 0 : creditsRequired,
             remainingCredits: apiKey ? user.credits : user.credits - creditsRequired
         });
@@ -195,49 +242,76 @@ router.post('/scene', async (req, res) => {
         // Upload to blob storage and save to database
         const uploadedUrls = [];
         const savedAssets = [];
-        for (let i = 0; i < result.images.length; i++) {
-            const imageDataUrl = result.images[i];
-            try {
-                const url = await (0, generation_service_1.uploadGeneratedImage)(imageDataUrl, user.id, 'scene');
-                uploadedUrls.push(url);
-                // Determine file type
-                const mimeMatch = imageDataUrl.match(/data:([^;]+);/);
-                const mimeType = mimeMatch ? mimeMatch[1] : 'image/png';
-                const fileType = mimeType === 'image/gif' ? 'gif' : 'png';
-                // Save asset to database with all details
-                const asset = await asset_service_1.AssetService.create({
-                    project_id: projectId || undefined,
+        let createdProjectId = null;
+        let createdProject = null;
+        if (result.images.length > 0) {
+            // Auto-create a new project for this generation
+            if (!projectId) {
+                const projectTitle = prompt.length > 50 ? prompt.substring(0, 47) + '...' : prompt;
+                createdProject = await project_service_1.ProjectService.create({
                     user_id: user.id,
-                    name: `${sceneType}_${Date.now()}_${i + 1}`,
-                    asset_type: 'scene',
-                    file_type: fileType,
-                    blob_url: url,
-                    metadata: {
-                        prompt,
+                    title: projectTitle || 'Untitled Scene',
+                    type: 'scene',
+                    description: prompt,
+                    settings: {
                         style,
                         viewpoint,
-                        colors,
-                        aspect_ratio: aspectRatio,
-                        scene_type: sceneType,
-                        user_name: user.display_name || user.email,
-                        variant_index: i + 1,
-                        generation_params: {
-                            quantity,
-                            has_reference: !!referenceImage,
-                        }
-                    }
+                        scene_type: sceneType
+                    },
+                    status: 'active'
                 });
-                savedAssets.push(asset);
+                createdProjectId = createdProject.id;
+                console.log(`[Project] Auto-created scene project: ${createdProjectId}`);
             }
-            catch (uploadError) {
-                console.error('Failed to upload image:', uploadError);
-                uploadedUrls.push(imageDataUrl);
+            else {
+                createdProjectId = projectId;
+            }
+            for (let i = 0; i < result.images.length; i++) {
+                const imageDataUrl = result.images[i];
+                try {
+                    const url = await (0, generation_service_1.uploadGeneratedImage)(imageDataUrl, user.id, 'scene');
+                    uploadedUrls.push(url);
+                    // Determine file type
+                    const mimeMatch = imageDataUrl.match(/data:([^;]+);/);
+                    const mimeType = mimeMatch ? mimeMatch[1] : 'image/png';
+                    const fileType = mimeType === 'image/gif' ? 'gif' : 'png';
+                    // Save asset to database - linked to the project
+                    const asset = await asset_service_1.AssetService.create({
+                        project_id: createdProjectId || undefined,
+                        user_id: user.id,
+                        name: `${sceneType}_${Date.now()}_${i + 1}`,
+                        asset_type: 'scene',
+                        file_type: fileType,
+                        blob_url: url,
+                        metadata: {
+                            prompt,
+                            style,
+                            viewpoint,
+                            colors,
+                            aspect_ratio: aspectRatio,
+                            scene_type: sceneType,
+                            user_name: user.display_name || user.email,
+                            variant_index: i + 1,
+                            generation_params: {
+                                quantity,
+                                has_reference: !!referenceImage,
+                            }
+                        }
+                    });
+                    savedAssets.push(asset);
+                }
+                catch (uploadError) {
+                    console.error('Failed to upload image:', uploadError);
+                    uploadedUrls.push(imageDataUrl);
+                }
             }
         }
         res.json({
             success: true,
             images: uploadedUrls,
-            assets: savedAssets,
+            assets: savedAssets.map(serializeAsset),
+            project: createdProject ? serializeProject(createdProject) : null,
+            projectId: createdProjectId,
             creditsUsed: apiKey ? 0 : creditsRequired,
             remainingCredits: apiKey ? user.credits : user.credits - creditsRequired
         });
@@ -350,7 +424,7 @@ router.post('/animation', async (req, res) => {
         res.json({
             success: true,
             frames: uploadedUrls,
-            assets: savedAssets,
+            assets: savedAssets.map(serializeAsset),
             frameCount: uploadedUrls.length,
             creditsUsed: apiKey ? 0 : creditsRequired,
             remainingCredits: apiKey ? user.credits : user.credits - creditsRequired
@@ -396,7 +470,7 @@ router.get('/history', async (req, res) => {
         });
         res.json({
             success: true,
-            assets,
+            assets: assets.map(serializeAsset),
             count: assets.length,
         });
     }
@@ -433,13 +507,155 @@ router.get('/asset/:id', async (req, res) => {
         }
         res.json({
             success: true,
-            asset,
+            asset: serializeAsset(asset),
         });
     }
     catch (error) {
         console.error('Asset fetch error:', error);
         res.status(500).json({
             error: 'Failed to fetch asset',
+            message: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+});
+// POST /api/generate/direct-animation - Generate full animation sprite sheet
+router.post('/direct-animation', async (req, res) => {
+    try {
+        // Verify authentication
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            return res.status(401).json({ error: 'Missing or invalid authorization header' });
+        }
+        const token = authHeader.split('Bearer ')[1];
+        const decodedToken = await (0, auth_1.verifyToken)(token);
+        if (!decodedToken) {
+            return res.status(401).json({ error: 'Invalid token' });
+        }
+        // Get user and check credits
+        const user = await user_service_1.UserService.findByFirebaseUid(decodedToken.uid);
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        const creditsRequired = 6;
+        if (user.credits < creditsRequired) {
+            return res.status(402).json({
+                error: 'Insufficient credits',
+                required: creditsRequired,
+                available: user.credits
+            });
+        }
+        // Get generation parameters
+        const { prompt, style = 'four_angle_walking', width = 48, height = 48, quantity = 1, return_spritesheet = true, bypass_prompt_expansion = false, projectId, apiKey } = req.body;
+        if (!prompt || prompt.trim().length === 0) {
+            return res.status(400).json({ error: 'Prompt is required' });
+        }
+        const userApiKey = apiKey;
+        const userProvider = req.body.provider || 'replicate';
+        // Generate images
+        const result = await (0, generation_service_1.generateDirectAnimation)({
+            prompt,
+            style,
+            width,
+            height,
+            quantity: Math.min(quantity, 4),
+            return_spritesheet,
+            bypass_prompt_expansion
+        }, {
+            apiKey: userApiKey,
+            provider: userProvider,
+            useOwnKey: !!userApiKey
+        });
+        if (!result.success) {
+            return res.status(500).json({ error: result.error || 'Generation failed' });
+        }
+        // Deduct credits
+        if (!userApiKey) {
+            await user_service_1.UserService.deductCredits(user.id, creditsRequired * (Math.min(quantity, 4)));
+        }
+        // Upload to blob storage and save to database
+        const uploadedUrls = [];
+        const savedAssets = [];
+        const shouldUpload = req.body.saveToCloud !== false;
+        let createdProjectId = null;
+        let createdProject = null;
+        if (shouldUpload && result.images.length > 0) {
+            // Auto-create a new project for this generation
+            if (!projectId) {
+                const projectTitle = prompt.length > 50 ? prompt.substring(0, 47) + '...' : prompt;
+                createdProject = await project_service_1.ProjectService.create({
+                    user_id: user.id,
+                    title: projectTitle || 'Untitled Animation',
+                    type: 'sprite',
+                    description: prompt,
+                    settings: {
+                        style,
+                        dimensions: `${width}x${height}`,
+                        animation_type: style
+                    },
+                    status: 'active'
+                });
+                createdProjectId = createdProject.id;
+                console.log(`[Project] Auto-created animation project: ${createdProjectId}`);
+            }
+            else {
+                createdProjectId = projectId;
+            }
+            for (let i = 0; i < result.images.length; i++) {
+                const imageDataUrl = result.images[i];
+                try {
+                    const url = await (0, generation_service_1.uploadGeneratedImage)(imageDataUrl, user.id, 'sprite');
+                    uploadedUrls.push(url);
+                    // Determine file type
+                    const mimeMatch = imageDataUrl.match(/data:([^;]+);/);
+                    const mimeType = mimeMatch ? mimeMatch[1] : 'image/png';
+                    const fileType = mimeType === 'image/gif' ? 'gif' : 'png';
+                    // Save asset to database - linked to the project
+                    const asset = await asset_service_1.AssetService.create({
+                        project_id: createdProjectId || undefined,
+                        user_id: user.id,
+                        name: `animation_sheet_${Date.now()}_${i + 1}`,
+                        asset_type: 'animation',
+                        file_type: fileType,
+                        blob_url: url,
+                        metadata: {
+                            prompt,
+                            style,
+                            dimensions: `${width}x${height}`,
+                            sprite_type: 'animation_sheet',
+                            animation_type: style,
+                            user_name: user.display_name || user.email,
+                            variant_index: i + 1,
+                            generation_params: {
+                                quantity,
+                                style,
+                                return_spritesheet,
+                                width,
+                                height
+                            }
+                        }
+                    });
+                    savedAssets.push(asset);
+                }
+                catch (uploadError) {
+                    console.error('Failed to upload image:', uploadError);
+                    uploadedUrls.push(imageDataUrl);
+                }
+            }
+        }
+        res.json({
+            success: true,
+            images: shouldUpload ? uploadedUrls : result.images,
+            assets: savedAssets.map(serializeAsset),
+            project: createdProject ? serializeProject(createdProject) : null,
+            projectId: createdProjectId,
+            creditsUsed: apiKey ? 0 : creditsRequired * quantity,
+            remainingCredits: apiKey ? user.credits : user.credits - (creditsRequired * quantity)
+        });
+    }
+    catch (error) {
+        console.error('Direct animation generation error:', error);
+        res.status(500).json({
+            error: 'Failed to generate direct animation',
             message: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }

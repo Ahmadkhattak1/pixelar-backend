@@ -3,6 +3,9 @@
  * Can be deployed to Firebase Cloud Run or Firebase Functions
  */
 
+import dotenv from 'dotenv';
+dotenv.config({ path: '.env.local' });
+
 import express, { Express, Request, Response } from 'express';
 import cors from 'cors';
 import authRoutes from './routes/auth.routes';
@@ -10,6 +13,7 @@ import userRoutes from './routes/user.routes';
 import generationRoutes from './routes/generation.routes';
 import projectRoutes from './routes/project.routes';
 import assetRoutes from './routes/asset.routes';
+import spritesheetRoutes from './routes/spritesheet.routes';
 
 const app: Express = express();
 const PORT = process.env.PORT || 3001;
@@ -33,6 +37,7 @@ app.use('/api/user', userRoutes);
 app.use('/api/generate', generationRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/assets', assetRoutes);
+app.use('/api/spritesheet', spritesheetRoutes);
 
 // 404 handler
 app.use((req: Request, res: Response) => {
