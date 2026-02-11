@@ -254,6 +254,8 @@ router.post('/scene', async (req: Request, res: Response) => {
             quantity = 2,
             referenceImage,
             sceneType = 'environment',
+            tileX = false,
+            tileY = false,
             projectId,
             apiKey
         } = req.body;
@@ -276,6 +278,8 @@ router.post('/scene', async (req: Request, res: Response) => {
             quantity: Math.min(quantity, 4),
             referenceImage,
             sceneType,
+            tileX,
+            tileY,
         }, {
             apiKey: userApiKey,
             provider: userProvider,

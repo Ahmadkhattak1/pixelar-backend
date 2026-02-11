@@ -145,29 +145,7 @@ async function callReplicate(
     model: string,
     input: any
 ): Promise<any> {
-    // start prediction
-    const createResponse = await fetch('https://api.replicate.com/v1/predictions', {
-        method: 'POST',
-        headers: {
-            'Authorization': `Token ${apiToken}`,
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            version: model.includes(':') ? model.split(':')[1] : undefined, // sending version if it has one, or model if using simple name path in url?
-            // Actually Replicate generic API usually takes version in body for community models, or uses model path in URL for official ones.
-            // For now let's stick to the existing pattern but support full model names in input if needed.
-            // A safer way for "google/gemini-2.5-flash" type models is actually using the `models/{owner}/{name}/predictions` endpoint if possible OR just `predictions` with version.
-            // However, the provided IDs are "google/gemini-2.5-flash" and "qwen/qwen-image-edit-plus". These are likely model paths.
-            // Replicate API v1 allows POST to /models/{owner}/{name}/predictions.
-            // Let's deduce the endpoint from the model string.
-            input,
-        })
-    });
-
-    // WAIT! The standard /predictions endpoint REQUIRES a version for community models.
-    // If we only have "google/gemini-2.5-flash", we might strictly need the model version hash OR use the model-specific endpoint.
-    // Let's try using the model-specific endpoint: https://api.replicate.com/v1/models/{model_owner}/{model_name}/predictions
-
+    // Use model-specific endpoint for owner/name model IDs, or generic endpoint with explicit version.
     let url = 'https://api.replicate.com/v1/predictions';
     let body: any = { input };
 
@@ -217,86 +195,10 @@ async function callReplicate(
     return prediction.output;
 }
 
-// Intelligence Layer: Gemini 2.5 Flash on Replicate
-async function refinePromptWithIntelligence(
-    userPrompt: string,
-    context: GenerationParams,
-    apiToken: string
-): Promise<string> {
-    console.log("Calling Intelligence Layer (Gemini 2.5 Flash)...");
-
-    // Check if user explicitly wants a partial/half character
-    const isPartialCharacter = wantsPartialCharacter(userPrompt);
-
-    const styleDescription = context.style === 'pixel_art'
-        ? 'Pixel Art style with clear pixel boundaries, limited color palette, retro game aesthetic, sharp pixelated edges'
-        : '2D flat vector style with clean lines, solid colors, modern appearance';
-
-    const fullBodyInstruction = isPartialCharacter
-        ? ''
-        : `
-    CRITICAL CHARACTER REQUIREMENT:
-    - ALWAYS generate FULL-BODY characters showing the ENTIRE figure from head to feet
-    - Characters must be fully standing/visible, NOT cropped at chest, waist, or knees
-    - Include the character's full legs and feet in the frame
-    - The character should be centered and complete within the image bounds
-    - Do NOT generate half-body, bust, portrait, or cropped character images`;
-
-    const systemInstruction = `You are an expert prompt engineer for game asset generation (sprites and scenes).
-Your task is to ENHANCE the user's request into a detailed, technical prompt optimized for image generation.
-
-IMPORTANT RULES:
-1. PRESERVE THE ORIGINAL STYLE - Do not change the core artistic style the user requested
-2. Keep the same art direction (${styleDescription})
-3. Only add technical details that enhance quality without changing the fundamental look
-4. Do not add realistic elements to pixel art or stylized requests
-5. Maintain the game-ready aesthetic appropriate for 2D game assets
-${fullBodyInstruction}
-
-Context:
-- Type: ${context.type}
-- SubType: ${context.type === 'sprite' ? (context.spriteType || 'character') : (context.sceneType || 'environment')}
-- Style: ${context.style} (DO NOT CHANGE THIS)
-- Viewpoint: ${context.viewpoint}
-- Aspect Ratio: ${context.aspectRatio}
-
-Output ONLY the enhanced prompt string. No explanations, no markdown, no commentary.`;
-
-    const fullBodyPromptAddition = isPartialCharacter
-        ? ''
-        : ' The character must be FULL-BODY showing head to feet, completely visible and not cropped.';
-
-    const input = {
-        prompt: `Enhance this prompt for game asset generation: "${userPrompt}"${fullBodyPromptAddition}
-
-Requirements:
-- Keep the ${context.style === 'pixel_art' ? 'pixel art' : '2D flat'} style intact
-- Add details about lighting, texture, and composition
-- Ensure the output is suitable for a ${context.type} game asset
-- Do NOT make it realistic or change the artistic style`,
-        system_instruction: systemInstruction,
-        max_output_tokens: 1024,
-        temperature: 0.5, // Lower temperature for more consistent outputs
-        top_p: 0.9
-    };
-
-    try {
-        const output = await callReplicate(apiToken, 'google/gemini-2.5-flash', input);
-        // Gemini on Replicate likely returns an array of strings or a single string
-        const result = Array.isArray(output) ? output.join('') : output;
-        console.log("Intelligence Layer Output:", result);
-        return result || userPrompt;
-    } catch (e) {
-        console.error("Intelligence Layer failed, falling back to raw prompt:", e);
-        return buildPrompt(context); // Fallback to our internal builder
-    }
-}
-
 // Pose-based Generation: Qwen Image Edit Plus
 async function generateWithQwen(
-    refinedPrompt: string,
+    prompt: string,
     poseImage: string,
-    context: GenerationParams,
     apiToken: string
 ): Promise<string[]> {
     console.log("Calling Qwen Image Edit Plus for Pose Generation...");
@@ -307,7 +209,7 @@ async function generateWithQwen(
     // "Formulate a prompt for QwenEdit that it generate pixelated sprites... not realistic images"
 
     const input = {
-        prompt: refinedPrompt, // The intelligence layer prompt
+        prompt,
         image: poseImage, // The pose/reference
         aspect_ratio: "match_input_image", // Or map context.aspectRatio
         output_format: "webp",
@@ -341,19 +243,14 @@ async function generateWithReplicate(
     modelId?: string
 ): Promise<GenerationResult> {
     try {
-        let finalPrompt = params.prompt;
-
-        // 1. Intelligence Layer
-        // We always use intelligence layer to refine/build the prompt unless skipped
-        // But for now let's assume we use it.
-        finalPrompt = await refinePromptWithIntelligence(params.prompt, params, apiToken);
+        const finalPrompt = params.prompt;
 
         // 2. Generation
         const images: string[] = [];
 
         if (params.poseImage) {
             // POSE DETECTED -> Use Qwen
-            const qwenOutputs = await generateWithQwen(finalPrompt, params.poseImage, params, apiToken);
+            const qwenOutputs = await generateWithQwen(finalPrompt, params.poseImage, apiToken);
 
             // fetch images
             for (const url of qwenOutputs) {
@@ -847,7 +744,7 @@ export async function generateDirectAnimation(
     params: DirectAnimationParams,
     options: GenerationOptions = {}
 ): Promise<GenerationResult> {
-    const { apiKey, provider, useOwnKey } = options;
+    const { apiKey, useOwnKey } = options;
     const model = 'retro-diffusion/rd-animation';
 
     let token = apiKey;
@@ -864,21 +761,7 @@ export async function generateDirectAnimation(
     }
 
     try {
-        let finalPrompt = params.prompt;
-
-        // 1. Intelligence Layer (Optional)
-        if (!params.bypass_prompt_expansion) {
-            // Mock context for intelligence layer
-            const context: any = {
-                type: 'sprite',
-                spriteType: 'character',
-                style: params.style || 'pixel_art',
-                viewpoint: 'isometric', // default assumption
-                aspectRatio: '1:1'
-            };
-            // We reuse the existing refine prompt function but keep it simple
-            finalPrompt = await refinePromptWithIntelligence(params.prompt, context, token);
-        }
+        const finalPrompt = params.prompt;
 
         const images: string[] = [];
         const quantity = params.quantity || 1;
@@ -887,41 +770,6 @@ export async function generateDirectAnimation(
         for (let i = 0; i < quantity; i++) {
             console.log(`Generating animation sheet ${i + 1}/${quantity} with ${model}...`);
 
-            const input = {
-                prompt: finalPrompt,
-                style: params.style || 'four_angle_walking',
-                width: params.width || 48,
-                height: params.height || 48,
-                seed: params.seed, // If provided, strictly use it. If looping, maybe increment?
-                // unique seed per iteration if not fixed?
-                // If user provides a seed, they usually want reproducibility. If quantity > 1, providing same seed gives same image.
-                // So if seed is present, we pass it. If null, we let API normalize.
-                // But for multiple variations, we shouldn't pass the same seed.
-                // Let's assume if quantity > 1 and seed is provided, maybe we increment it?
-                // For now, pass seed as is.
-                ...(params.seed !== undefined && { seed: params.seed }),
-                input_image: params.input_image,
-                return_spritesheet: params.return_spritesheet !== undefined ? params.return_spritesheet : true, // Default to true as per request
-                bypass_prompt_expansion: true // We already expanded it or user requested bypass. Logic implies we pass raw prompt to model if we expanded it ourselves.
-                // Actually the model implementation of "bypass_prompt_expansion" might disable its INTERNAL expansion.
-                // If we expanded it, we likely want to bypass internal expansion to avoid double cooking.
-                // So set this to true if we expanded, or pass user param.
-            };
-
-            // Force bypass if we did our own expansion? Or maybe the model's expansion is better specialized?
-            // Retro Diffusion models have good internal prompt expansion.
-            // If user passed bypass_prompt_expansion=false, they WANT expansion.
-            // Our `refinePromptWithIntelligence` uses Gemini. `rd-animation` might use GPT or simple logic.
-            // Let's trust the user's flag for the MODEL input.
-            // BUT if we used Gemini, we are sending a "cooked" prompt.
-            // Let's adhere to: If we use Gemini, we send that as prompt.
-
-            // Correct logic:
-            // If params.bypass_prompt_expansion is TRUE: We skip Gemini. We tell Model to bypass (maybe?).
-            // The Model's flag `bypass_prompt_expansion` likely disables ITS internal magic.
-            // Let's pass the params as-is to the model input regarding the flag, but we modify the prompt string itself if we used Gemini.
-
-            // Revised Input Construction
             const payload = {
                 prompt: finalPrompt,
                 style: params.style || 'four_angle_walking',

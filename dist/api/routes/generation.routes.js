@@ -210,7 +210,7 @@ router.post('/scene', async (req, res) => {
             });
         }
         // Get generation parameters
-        const { prompt, style = 'pixel_art', aspectRatio = '16:9', viewpoint = 'side', colors = [], quantity = 2, referenceImage, sceneType = 'environment', projectId, apiKey } = req.body;
+        const { prompt, style = 'pixel_art', aspectRatio = '16:9', viewpoint = 'side', colors = [], quantity = 2, referenceImage, sceneType = 'environment', tileX = false, tileY = false, projectId, apiKey } = req.body;
         if (!prompt || prompt.trim().length === 0) {
             return res.status(400).json({ error: 'Prompt is required' });
         }
@@ -227,6 +227,8 @@ router.post('/scene', async (req, res) => {
             quantity: Math.min(quantity, 4),
             referenceImage,
             sceneType,
+            tileX,
+            tileY,
         }, {
             apiKey: userApiKey,
             provider: userProvider,
