@@ -8,7 +8,7 @@ import { put } from '@vercel/blob';
 interface GenerationParams {
     prompt: string;
     type: 'sprite' | 'scene';
-    style: 'pixel_art' | '2d_flat';
+    style: string;
     aspectRatio: string;
     viewpoint: string;
     colors?: string[];
@@ -20,7 +20,7 @@ interface GenerationParams {
     tileX?: boolean;
     tileY?: boolean;
     spriteType?: 'character' | 'object';
-    sceneType?: 'indoor' | 'outdoor';
+    sceneType?: 'indoor' | 'outdoor' | 'environment';
 }
 
 interface GenerationResult {
@@ -49,6 +49,82 @@ function getImageDimensions(aspectRatio: string): { width: number; height: numbe
     return ratioMap[aspectRatio] || { width: 1024, height: 1024 };
 }
 
+const RD_PLUS_STYLES = new Set([
+    'default',
+    'retro',
+    'watercolor',
+    'textured',
+    'cartoon',
+    'ui_element',
+    'item_sheet',
+    'character_turnaround',
+    'environment',
+    'isometric',
+    'isometric_asset',
+    'topdown_map',
+    'topdown_asset',
+    'classic',
+    'topdown_item',
+    'low_res',
+    'mc_item',
+    'mc_texture',
+    'skill_icon',
+]);
+
+function isValidRdPlusStyle(style?: string): boolean {
+    return !!style && RD_PLUS_STYLES.has(style);
+}
+
+export function resolveRdPlusStyle(params: GenerationParams): string {
+    const requestedStyle = isValidRdPlusStyle(params.style) ? params.style : 'default';
+
+    if (params.type === 'scene') {
+        if (params.viewpoint === 'isometric' && ['default', 'environment'].includes(requestedStyle)) {
+            return 'isometric';
+        }
+
+        if (params.viewpoint === 'top_down' && ['default', 'environment'].includes(requestedStyle)) {
+            return 'topdown_map';
+        }
+
+        return requestedStyle;
+    }
+
+    if (params.viewpoint === 'isometric' && requestedStyle === 'default') {
+        return params.spriteType === 'object' ? 'isometric_asset' : 'isometric';
+    }
+
+    if (params.viewpoint === 'top_down' && requestedStyle === 'default') {
+        return params.spriteType === 'object' ? 'topdown_item' : 'topdown_asset';
+    }
+
+    return requestedStyle;
+}
+
+function clampRdPlusDimension(value: number): number {
+    return Math.max(16, Math.min(384, Math.round(value)));
+}
+
+export function getRdPlusDimensions(params: GenerationParams): { width: number; height: number } {
+    if (params.dimensions) {
+        const [w, h] = params.dimensions.split('x').map(Number);
+        if (!isNaN(w) && !isNaN(h)) {
+            return {
+                width: clampRdPlusDimension(w),
+                height: clampRdPlusDimension(h),
+            };
+        }
+    }
+
+    const dims = getImageDimensions(params.aspectRatio);
+    const scale = 384 / Math.max(dims.width, dims.height);
+
+    return {
+        width: clampRdPlusDimension(dims.width * scale),
+        height: clampRdPlusDimension(dims.height * scale),
+    };
+}
+
 // Check if user wants a partial/half character based on prompt
 function wantsPartialCharacter(prompt: string): boolean {
     const promptLower = prompt.toLowerCase();
@@ -70,10 +146,10 @@ function buildPrompt(params: GenerationParams): string {
     let fullPrompt = '';
 
     // Style prefix
-    if (style === 'pixel_art') {
-        fullPrompt += 'Create a pixel art style image. Use clear pixel boundaries, limited color palette, and retro game aesthetic. ';
-    } else {
+    if (style === '2d_flat') {
         fullPrompt += 'Create a 2D flat style image with clean lines, solid colors, and modern vector-like appearance. ';
+    } else {
+        fullPrompt += 'Create a pixel art style image. Use clear pixel boundaries, limited color palette, and retro game aesthetic. ';
     }
 
     // Type context
@@ -97,7 +173,7 @@ function buildPrompt(params: GenerationParams): string {
         'back': 'Show from behind/back view. ',
         'side': 'Show from a side profile view. ',
         'top_down': 'Show from a top-down/bird\'s eye view. ',
-        'isometric': 'Show in isometric perspective (45-degree angle). ',
+        'isometric': 'Show in 45-degree isometric perspective with visible top surfaces, diagonal depth, and no one-point horizon. ',
     };
     fullPrompt += viewpointDescriptions[viewpoint] || '';
 
@@ -110,9 +186,10 @@ function buildPrompt(params: GenerationParams): string {
         fullPrompt += `Use these colors prominently in the design: ${colors.join(', ')}. `;
     }
 
-    // Dimensions hint for sprite size
-    if (dimensions && type === 'sprite') {
-        fullPrompt += `The sprite should be designed to look good at ${dimensions} pixel dimensions. `;
+    if (dimensions) {
+        fullPrompt += type === 'sprite'
+            ? `The sprite should be designed to look good at ${dimensions} pixel dimensions. `
+            : `The scene should be composed for ${dimensions} pixel dimensions. `;
     }
 
     // User prompt
@@ -243,7 +320,7 @@ async function generateWithReplicate(
     modelId?: string
 ): Promise<GenerationResult> {
     try {
-        const finalPrompt = params.prompt;
+        const finalPrompt = buildPrompt(params);
 
         // 2. Generation
         const images: string[] = [];
@@ -266,32 +343,15 @@ async function generateWithReplicate(
             const model = 'retro-diffusion/rd-plus';
             console.log(`Using Standard Model: ${model}`);
 
-            // Parse dimensions
-            let width = 128;
-            let height = 128;
-
-            if (params.dimensions) {
-                const [w, h] = params.dimensions.split('x').map(Number);
-                if (!isNaN(w) && !isNaN(h)) {
-                    width = w;
-                    height = h;
-                }
-            } else if (params.aspectRatio) {
-                const dims = getImageDimensions(params.aspectRatio);
-                let maxDim = Math.max(dims.width, dims.height);
-                if (maxDim > 384) maxDim = 384;
-
-                const scale = 384 / Math.max(dims.width, dims.height);
-                width = Math.round(dims.width * scale);
-                height = Math.round(dims.height * scale);
-            }
+            const { width, height } = getRdPlusDimensions(params);
+            const rdPlusStyle = resolveRdPlusStyle(params);
 
             const input = {
                 prompt: finalPrompt,
                 width,
                 height,
                 num_images: params.quantity, // Model supports up to 10
-                style: params.style || 'default',
+                style: rdPlusStyle,
                 remove_bg: params.removeBg || false,
                 tile_x: params.tileX || false,
                 tile_y: params.tileY || false,

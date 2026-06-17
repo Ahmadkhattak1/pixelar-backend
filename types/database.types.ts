@@ -57,7 +57,7 @@ export type ProjectType = 'sprite' | 'scene';
 export type ProjectStatus = 'draft' | 'active' | 'archived' | 'deleted';
 
 export interface ProjectSettings {
-  style?: 'pixel_art' | '2d_flat';
+  style?: string;
   viewpoint?: 'front' | 'back' | 'side' | 'top_down' | 'isometric';
   dimensions?: string; // e.g., "64x64", "128x128"
   sprite_type?: 'character' | 'object'; // For sprite projects only
@@ -332,4 +332,3 @@ export type DatabaseRecord<T> = T & {
 export type PartialRecord<T> = Partial<T> & {
   id: string;
 };
-

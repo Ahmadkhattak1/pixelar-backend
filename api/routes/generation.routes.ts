@@ -5,7 +5,7 @@
 
 import { Router, Request, Response } from 'express';
 import { verifyToken } from '../../lib/auth';
-import { generateImages, uploadGeneratedImage, generateAnimationFrames, generateDirectAnimation } from '../../services/generation.service';
+import { generateImages, uploadGeneratedImage, generateAnimationFrames, generateDirectAnimation, resolveRdPlusStyle, getRdPlusDimensions } from '../../services/generation.service';
 import { UserService } from '../../services/user.service';
 import { AssetService } from '../../services/asset.service';
 import { ProjectService } from '../../services/project.service';
@@ -247,10 +247,11 @@ router.post('/scene', async (req: Request, res: Response) => {
         // Get generation parameters
         const {
             prompt,
-            style = 'pixel_art',
+            style = 'environment',
             aspectRatio = '16:9',
             viewpoint = 'side',
             colors = [],
+            dimensions = '256x256',
             quantity = 2,
             referenceImage,
             sceneType = 'environment',
@@ -267,20 +268,26 @@ router.post('/scene', async (req: Request, res: Response) => {
         const userApiKey = apiKey;
         const userProvider = req.body.provider || 'replicate';
 
-        // Generate images
-        const result = await generateImages({
+        const sceneGenerationParams = {
             prompt,
             type: 'scene',
             style,
             aspectRatio,
             viewpoint,
             colors,
+            dimensions,
             quantity: Math.min(quantity, 4),
             referenceImage,
             sceneType,
             tileX,
             tileY,
-        }, {
+        } as const;
+        const effectiveStyle = resolveRdPlusStyle(sceneGenerationParams);
+        const effectiveDimensions = getRdPlusDimensions(sceneGenerationParams);
+        const effectiveDimensionsLabel = `${effectiveDimensions.width}x${effectiveDimensions.height}`;
+
+        // Generate images
+        const result = await generateImages(sceneGenerationParams, {
             apiKey: userApiKey,
             provider: userProvider,
             useOwnKey: !!userApiKey
@@ -311,9 +318,11 @@ router.post('/scene', async (req: Request, res: Response) => {
                     type: 'scene',
                     description: prompt,
                     settings: {
-                        style,
+                        style: effectiveStyle,
+                        requested_style: style,
                         viewpoint,
-                        scene_type: sceneType
+                        scene_type: sceneType,
+                        dimensions: effectiveDimensionsLabel
                     },
                     status: 'active'
                 });
@@ -344,8 +353,10 @@ router.post('/scene', async (req: Request, res: Response) => {
                         blob_url: url,
                         metadata: {
                             prompt,
-                            style,
+                            style: effectiveStyle,
+                            requested_style: style,
                             viewpoint,
+                            dimensions: effectiveDimensionsLabel,
                             colors,
                             aspect_ratio: aspectRatio,
                             scene_type: sceneType,
@@ -354,6 +365,10 @@ router.post('/scene', async (req: Request, res: Response) => {
                             generation_params: {
                                 quantity,
                                 has_reference: !!referenceImage,
+                                requested_dimensions: dimensions,
+                                model_width: effectiveDimensions.width,
+                                model_height: effectiveDimensions.height,
+                                model_style: effectiveStyle,
                             }
                         }
                     });
